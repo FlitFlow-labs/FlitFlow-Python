@@ -9,6 +9,8 @@ class RuntimeEngine:
     def __init__(self, ast: dict[str, Any]):
         self.ast = ast
         self.functions: dict[str, BaseFunction] = {}
+        self.root_state: dict[str, Any] = {}
+        self.loop_depth = 0  # Track the current loop depth for signal handling
 
     def register_function(self, name: str, func_impl: BaseFunction) -> None:
         """Register built-in or custom functions."""
@@ -30,7 +32,9 @@ class RuntimeEngine:
         return evaluated
 
     def execute_steps(
-        self, steps: list[dict[str, Any]], state: dict[str, Any]
+        self,
+        steps: list[dict[str, Any]],
+        state: dict[str, Any],
     ) -> RuntimeResult:
         """Sequential execution loop for the step array."""
         overall_result = RuntimeResult()
@@ -41,7 +45,7 @@ class RuntimeEngine:
             params = step.get("params")
             target_var = step.get("target_variable")
 
-            # 1. Function Resolution (check whether the function exists)
+            # 1. Function Resolution
             if not isinstance(func_name, str):
                 overall_result.logs.append(
                     f"Undefined function invocation: '{func_name}'"
@@ -71,12 +75,28 @@ class RuntimeEngine:
                 engine=self,
             )
 
-            # Merge the logs and status into the overall result
+            # Merge logs and status
             overall_result.merge(step_result)
             overall_result.value = step_result.value
 
-            # 5. Signal Bubbling (propagate RETURN / BREAK / CONTINUE)
             if step_result.signal != Signal.NONE:
+                if step_result.signal in (Signal.BREAK, Signal.CONTINUE):
+                    if self.loop_depth > 0:
+                        # in-loop: propagate the signal to the loop boundary
+                        overall_result.signal = step_result.signal
+                        break
+                    else:
+                        # out-of-loop: log a warning and continue execution (do not propagate the signal)
+                        overall_result.logs.append(
+                            f"Out-of-loop control signal ignored: {step_result.signal}"
+                        )
+                        if overall_result.status == Status.SUCCESS:
+                            overall_result.status = Status.WARNING
+                        
+                        # not setting signal to NONE here, so that the next steps can continue normally
+                        continue
+
+                # RETURN signal must always propagate to the caller, regardless of loop depth
                 overall_result.signal = step_result.signal
                 break
 
@@ -103,7 +123,12 @@ class RuntimeEngine:
                 status=Status.ERROR,
                 logs=[f"AST Schema Validation Error: {err_msg}"],
             )
-
-        state = initial_state if initial_state is not None else {}
-        return self.execute_component("main", state)
-    
+        self.root_state = initial_state if initial_state is not None else {}
+        res = self.execute_component("main", self.root_state)
+        if res.signal in (Signal.BREAK, Signal.CONTINUE):
+            res.logs.append(f"Out-of-loop control signal ignored: {res.signal}")
+            if res.status == Status.SUCCESS:
+                res.status = Status.WARNING
+            res.signal = Signal.NONE
+        return res
+        

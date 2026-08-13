@@ -1,6 +1,7 @@
 from flitflow.engine import RuntimeEngine
 from flitflow.functions.control import (
     SetVariablesFunction,
+    SetGlobalVariablesFunction,
     CallComponentFunction,
     SwitchFunction,
     ForeachFunction,
@@ -21,6 +22,7 @@ def register_builtin_functions(engine: RuntimeEngine) -> None:
     builtins = {
         # Control Flow
         "set_variables": SetVariablesFunction(),
+        "set_global_variables": SetGlobalVariablesFunction(),
         "call_component": CallComponentFunction(),
         "switch": SwitchFunction(),
         "foreach": ForeachFunction(),

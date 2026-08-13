@@ -78,7 +78,10 @@ def test_tc_pipe_02_deferred_block_injection(create_engine):
                 "function": "foreach",
                 "args": {"items": [1, 2]},
                 "params": [
-                    {"function": "set_variables", "args": {"counter": "item"}}
+                    {
+                        "function": "set_global_variables",
+                        "args": {"counter": "item"},
+                    }
                 ],
             }
         ]
@@ -96,6 +99,35 @@ def test_tc_pipe_03_automatic_variable_binding(create_engine):
     state = {}
     engine.run(state)
     assert state.get("my_list") == []
+
+
+def test_tc_pipe_04_target_variable_overwrite(create_engine):
+    """TC-PIPE-04: target_variable overwrites existing value by default"""
+    ast = {"main": [{"function": "array_create", "target_variable": "my_list"}]}
+    engine = create_engine(ast)
+    state = {"my_list": [1, 2, 3]}
+    engine.run(state)
+    assert state.get("my_list") == []
+
+
+def test_tc_pipe_05_global_variable_assignment(create_engine):
+    """TC-PIPE-05: set_global_variables assigns key-value pairs to root state"""
+    ast = {
+        "main": [
+            {
+                "function": "set_global_variables",
+                "args": {"global_a": 100, "global_b": "hello"},
+                "target_variable": "assign_res",
+            }
+        ]
+    }
+    engine = create_engine(ast)
+    state = {}
+    res = engine.run(state)
+
+    assert state.get("global_a") == 100
+    assert state.get("global_b") == "hello"
+    assert res.value == {"global_a": 100, "global_b": "hello"}
 
 
 # ==========================================
@@ -138,10 +170,11 @@ def test_tc_safe_02_out_of_bounds_and_invalid_types(create_engine):
     }
     engine = create_engine(ast)
     state = {}
-    engine.run(state)
+    res = engine.run(state)
 
     assert state.get("val1") is None
     assert state.get("val2") is None
+    assert res.status in (Status.WARNING, Status.ERROR)
 
 
 # ==========================================
@@ -158,13 +191,13 @@ def test_tc_ctrl_01_switch_branching(create_engine):
                 "params": {
                     "admin": [
                         {
-                            "function": "set_variables",
+                            "function": "set_global_variables",
                             "args": {"permission": "all"},
                         }
                     ],
                     "default": [
                         {
-                            "function": "set_variables",
+                            "function": "set_global_variables",
                             "args": {"permission": "read"},
                         }
                     ],
@@ -186,8 +219,72 @@ def test_tc_ctrl_01_switch_branching(create_engine):
     assert state2.get("permission") == "read"
 
 
-def test_tc_ctrl_02_foreach_loop(create_engine):
-    """TC-CTRL-02: foreach loop and scope variable updates"""
+def test_tc_ctrl_02_switch_bool_lowercase_normalization(create_engine):
+    """TC-CTRL-02: Bool switch keys normalize to lowercase strings."""
+    ast = {
+        "main": [
+            {
+                "function": "switch",
+                "args": {"value": "is_express"},
+                "params": {
+                    "true": [
+                        {
+                            "function": "set_global_variables",
+                            "args": {"label": "exp"},
+                        }
+                    ],
+                    "false": [
+                        {
+                            "function": "set_global_variables",
+                            "args": {"label": "local"},
+                        }
+                    ],
+                },
+            }
+        ]
+    }
+
+    engine1 = create_engine(ast)
+    state1 = {"is_express": True}
+    engine1.run(state1)
+    assert state1.get("label") == "exp"
+
+    engine2 = create_engine(ast)
+    state2 = {"is_express": False}
+    engine2.run(state2)
+    assert state2.get("label") == "local"
+
+
+def test_tc_ctrl_03_switch_no_match_no_default_warning(create_engine):
+    """TC-CTRL-03: no match + no default => normal completion with warning log."""
+    ast = {
+        "main": [
+            {
+                "function": "switch",
+                "args": {"value": "role"},
+                "params": {
+                    "admin": [
+                        {
+                            "function": "set_global_variables",
+                            "args": {"permission": "all"},
+                        }
+                    ]
+                },
+            },
+            {"function": "set_variables", "args": {"after_switch": True}},
+        ]
+    }
+    engine = create_engine(ast)
+    state = {"role": "unknown"}
+    res = engine.run(state)
+
+    assert state.get("after_switch") is True
+    assert res.status in (Status.WARNING, Status.ERROR)
+    assert any("unresolved branch" in log for log in res.logs)
+
+
+def test_tc_ctrl_04_foreach_loop(create_engine):
+    """TC-CTRL-04: foreach loop basic execution"""
     ast = {
         "main": [
             {"function": "array_create", "target_variable": "output"},
@@ -206,11 +303,12 @@ def test_tc_ctrl_02_foreach_loop(create_engine):
     engine = create_engine(ast)
     state = {"list": ["a", "b"]}
     engine.run(state)
+    # Shallow copy shares object references, so array_push mutates output
     assert state.get("output") == ["a", "b"]
 
 
-def test_tc_ctrl_03_break_and_continue(create_engine):
-    """TC-CTRL-03: Control break and continue signals"""
+def test_tc_ctrl_05_break_and_continue(create_engine):
+    """TC-CTRL-05: Control break and continue signals in loop"""
     ast = {
         "main": [
             {"function": "array_create", "target_variable": "out"},
@@ -237,20 +335,45 @@ def test_tc_ctrl_03_break_and_continue(create_engine):
     engine = create_engine(ast)
     state = {"list": [1, 2, 3, 4]}
     engine.run(state)
+    # Shallow copy shares object references, so out is mutated
     assert state.get("out") == [1, 3]
 
 
-def test_tc_ctrl_04_return_signal_bubbling(create_engine):
-    """TC-CTRL-04: Propagate the return signal"""
+def test_tc_ctrl_06_out_of_loop_break_continue(create_engine):
+    """TC-CTRL-06: Out-of-loop break/continue => warning + ignored + continue."""
+    ast = {
+        "main": [
+            {"function": "break"},
+            {"function": "continue"},
+            {"function": "set_variables", "args": {"alive": True}},
+        ]
+    }
+    engine = create_engine(ast)
+    state = {}
+    res = engine.run(state)
+
+    assert state.get("alive") is True
+    assert res.status in (Status.WARNING, Status.ERROR)
+    assert any("Out-of-loop control signal ignored" in log for log in res.logs)
+
+
+def test_tc_ctrl_07_return_signal_bubbling(create_engine):
+    """TC-CTRL-07: Propagate the return signal boundary via call_component"""
     ast = {
         "main": [
             {"function": "call_component", "args": {"name": "sub"}},
             {"function": "set_variables", "args": {"after_call": True}},
         ],
         "sub": [
-            {"function": "set_variables", "args": {"sub_started": True}},
+            {
+                "function": "set_global_variables",
+                "args": {"sub_started": True},
+            },
             {"function": "return", "args": {"value": "stopped"}},
-            {"function": "set_variables", "args": {"sub_finished": True}},
+            {
+                "function": "set_global_variables",
+                "args": {"sub_finished": True},
+            },
         ],
     }
     engine = create_engine(ast)
@@ -263,7 +386,63 @@ def test_tc_ctrl_04_return_signal_bubbling(create_engine):
 
 
 # ==========================================
-# 5. Subroutine Suite (TC-COMP)
+# 5. Scope Behavior Suite (TC-SCOPE)
+# ==========================================
+
+def test_tc_scope_01_nested_step_shallow_copy(create_engine):
+    """TC-SCOPE-01: Nested step execution uses shallow-copied child state."""
+    ast = {
+        "main": [
+            {"function": "array_create", "target_variable": "out"},
+            {
+                "function": "foreach",
+                "args": {"items": "list", "as": "item"},
+                "params": [
+                    {
+                        "function": "set_variables",
+                        "args": {"seen": "item"},
+                        "target_variable": "last_seen",
+                    }
+                ],
+            },
+        ]
+    }
+    engine = create_engine(ast)
+    state = {"list": [1, 2]}
+    engine.run(state)
+
+    # set_variables inside nested scope should not leak to outer scope
+    assert "item" not in state
+    assert "index" not in state
+    assert "seen" not in state
+    assert "last_seen" not in state
+
+
+def test_tc_scope_03_set_global_variables_bypasses_local_scope(create_engine):
+    """TC-SCOPE-03: set_global_variables updates root state from nested scope."""
+    ast = {
+        "main": [
+            {
+                "function": "foreach",
+                "args": {"items": "list", "as": "item"},
+                "params": [
+                    {
+                        "function": "set_global_variables",
+                        "args": {"last_processed": "item"},
+                    }
+                ],
+            }
+        ]
+    }
+    engine = create_engine(ast)
+    state = {"list": [1, 2]}
+    engine.run(state)
+
+    assert state.get("last_processed") == 2
+
+
+# ==========================================
+# 6. Subroutine Suite (TC-COMP)
 # ==========================================
 
 def test_tc_comp_01_call_component(create_engine):
@@ -276,3 +455,38 @@ def test_tc_comp_01_call_component(create_engine):
     state = {}
     engine.run(state)
     assert state.get("initialized") is True
+
+
+def test_tc_comp_02_missing_component_safety(create_engine):
+    """TC-COMP-02: Safe handling when target component is missing"""
+    ast = {
+        "main": [
+            {
+                "function": "call_component",
+                "args": {"name": "no_such_component"},
+            },
+            {"function": "set_variables", "args": {"alive": True}},
+        ]
+    }
+    engine = create_engine(ast)
+    state = {}
+    res = engine.run(state)
+
+    assert state.get("alive") is True
+    assert res.status == Status.ERROR
+    assert any("Component 'no_such_component' not found" in log for log in res.logs)
+
+
+# ==========================================
+# 8. Validation Failure Suite (TC-VAL)
+# ==========================================
+
+def test_tc_val_01_runtime_abort_on_schema_failure(create_engine):
+    """TC-VAL-01: Runtime aborts when schema validation fails"""
+    ast = {"main": [{"args": {"x": 1}}]}
+    engine = create_engine(ast)
+    state = {}
+    res = engine.run(state)
+
+    assert res.status == Status.ERROR
+    assert len(res.logs) > 0
