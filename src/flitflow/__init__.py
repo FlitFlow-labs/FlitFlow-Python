@@ -3,7 +3,7 @@ from flitflow.engine import RuntimeEngine
 from flitflow.functions import register_builtin_functions
 from flitflow.schema import validate_ast
 
-__version__ = "1.0.0"
+__version__ = "1.1.1"
 
 __all__ = [
     "RuntimeEngine",
