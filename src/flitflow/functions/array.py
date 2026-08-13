@@ -70,7 +70,7 @@ class ArrayGetFunction(BaseFunction):
 
         # TC-SAFE-02 / SPEC 2.3.10: Return None (NULL) safely for out-of-bounds or invalid types
         return RuntimeResult(
-            status=Status.SUCCESS,
+            status=Status.WARNING,
             value=None,
             logs=[
                 f"array_get out-of-bounds or invalid type: array={target_array}, index={index}"

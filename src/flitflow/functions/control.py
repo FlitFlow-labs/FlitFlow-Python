@@ -30,6 +30,35 @@ class SetVariablesFunction(BaseFunction):
         return RuntimeResult(status=Status.SUCCESS, value=return_value)
 
 
+class SetGlobalVariablesFunction(BaseFunction):
+    """`set_global_variables`: Set variables in the root execution state."""
+
+    def execute(
+        self,
+        args: dict[str, Any],
+        params: Any,
+        state: dict[str, Any],
+        engine: Any,
+    ) -> RuntimeResult:
+        if not isinstance(args, dict):
+            return RuntimeResult(
+                status=Status.WARNING,
+                value=None,
+                logs=["set_global_variables args must be a dict"],
+            )
+
+        last_val = None
+        for key, val in args.items():
+            # Change the root state directly to ensure global visibility across components
+            engine.root_state[key] = val
+            # state[key] = val  # Also update the current state to reflect the change
+            state[key] = val
+            last_val = val
+
+        return_value = last_val if len(args) == 1 else args
+        return RuntimeResult(status=Status.SUCCESS, value=return_value)
+
+
 class CallComponentFunction(BaseFunction):
     """`call_component`: Invoke a subroutine."""
 
@@ -73,15 +102,35 @@ class SwitchFunction(BaseFunction):
         state: dict[str, Any],
         engine: Any,
     ) -> RuntimeResult:
-        val = str(args.get("value"))
+        raw_val = args.get("value")
+        if isinstance(raw_val, bool):
+            # Spec v1.1: bool MUST be normalized to lowercase strings
+            val = str(raw_val).lower()
+        else:
+            val = str(raw_val)
+
         if not isinstance(params, dict):
             return RuntimeResult(
                 status=Status.ERROR, logs=["switch 'params' must be a dict/object."]
             )
 
-        # Select the matching case, or use the default case if none matches
-        target_steps = params.get(val, params.get("default", []))
-        return engine.execute_steps(target_steps, state)
+        # Resolve branch:
+        # 1) exact case match
+        # 2) default branch
+        # 3) no-op normal completion + warning log
+        if val in params:
+            target_steps = params[val]
+            return engine.execute_steps(target_steps, state.copy())
+
+        if "default" in params:
+            target_steps = params["default"]
+            return engine.execute_steps(target_steps, state.copy())
+
+        return RuntimeResult(
+            status=Status.WARNING,
+            value=None,
+            logs=[f"switch unresolved branch: value={val}, no default provided."],
+        )
 
 
 class ForeachFunction(BaseFunction):
@@ -111,23 +160,29 @@ class ForeachFunction(BaseFunction):
             )
 
         overall_res = RuntimeResult()
+        engine.loop_depth += 1  # Increment loop depth for signal handling
 
         for idx, item in enumerate(items):
-            state[as_var] = item
-            state[index_var] = idx
+            # Spec v1.1: nested-step execution uses shallow-copied child state
+            child_state = state.copy()
+            child_state[as_var] = item
+            child_state[index_var] = idx
 
-            res = engine.execute_steps(params, state)
+            # in_loop=True: to bubble BREAK/CONTINUE signals to the loop boundary
+            res = engine.execute_steps(params, child_state)
             overall_res.merge(res)
             overall_res.value = res.value
 
-            # Handle BREAK / CONTINUE signals
+            # Handle BREAK / CONTINUE / RETURN signals
             if res.signal == Signal.BREAK:
                 break
+            elif res.signal == Signal.CONTINUE:
+                # Continue is consumed at loop boundary
+                continue
             elif res.signal == Signal.RETURN:
                 overall_res.signal = Signal.RETURN
                 break
-            # For CONTINUE, proceed to the next loop iteration
-
+        engine.loop_depth -= 1  # Decrement loop depth after loop completion
         return overall_res
 
 
